@@ -146,6 +146,7 @@ Welcome to this MLOps project, designed to demonstrate a robust pipeline for man
 1. **Data Ingestion** ➔ **Data Validation** ➔ **Data Transformation**
 2. **Model Training** ➔ **Model Evaluation** ➔ **Model Deployment**
 3. **CI/CD Automation** with GitHub Actions, Docker, AWS EC2, and ECR
+<img width="1861" height="964" alt="Screenshot (5)" src="https://github.com/user-attachments/assets/06b0b960-ddd2-49ab-87c9-f1841ee3dd43" />
 
 ---
 
