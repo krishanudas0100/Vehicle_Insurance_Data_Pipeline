@@ -38,6 +38,8 @@ Welcome to this MLOps project, designed to demonstrate a robust pipeline for man
 1. Create a folder named `notebook`, add the dataset, and create a notebook file `mongoDB_demo.ipynb`.
 2. Use the notebook to push data to the MongoDB database.
 3. Verify the data in MongoDB Atlas under Database > Browse Collections.
+   
+<img width="1895" height="952" alt="image" src="https://github.com/user-attachments/assets/6a8334be-99bb-4991-b032-575665ca08c8" />
 
 ---
 
@@ -71,6 +73,7 @@ Welcome to this MLOps project, designed to demonstrate a robust pipeline for man
 
 ---
 
+
 ## 🔍 Data Validation, Transformation & Model Training
 
 ### Step 9: Data Validation
@@ -103,6 +106,9 @@ Welcome to this MLOps project, designed to demonstrate a robust pipeline for man
 
 ---
 
+<img width="1915" height="963" alt="Screenshot (10)" src="https://github.com/user-attachments/assets/20cf429f-b71a-41f3-819a-c71d15f5459d" />
+
+
 ## 🚀 Model Evaluation, Model Pusher, and Prediction Pipeline
 
 ### Step 14: Model Evaluation & Model Pusher
@@ -124,14 +130,24 @@ Welcome to this MLOps project, designed to demonstrate a robust pipeline for man
    - `AWS_DEFAULT_REGION`
    - `ECR_REPO`
 
+<img width="1801" height="907" alt="image" src="https://github.com/user-attachments/assets/2b20086e-63ed-400c-94b2-f476e8dfe093" />
+
+<img width="1813" height="965" alt="image" src="https://github.com/user-attachments/assets/79679382-ceb6-47f7-8b42-0c08c7bfae1e" />
+
+
+
 ### Step 17: AWS EC2 and ECR
 1. Set up an EC2 instance for deployment.
 2. Install Docker on the EC2 machine.
 3. Connect EC2 as a self-hosted runner on GitHub.
 
+<img width="1867" height="902" alt="image" src="https://github.com/user-attachments/assets/7de823ef-2c36-4483-9b34-783cde13cfff" />
+
 ### Step 18: Final Steps
-1. Open the 5080 port on the EC2 instance.
-2. Access the deployed app by visiting `http://<public_ip>:5080`.
+1. Open the 5000 port on the EC2 instance.
+2. Access the deployed app by visiting `http://<public_ip>:5000`.
+
+<img width="1864" height="967" alt="Screenshot (4)" src="https://github.com/user-attachments/assets/23329157-cb3f-4bc1-9820-feb83596dea7" />
 
 ---
 
