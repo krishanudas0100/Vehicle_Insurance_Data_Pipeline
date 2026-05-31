@@ -1,19 +1,18 @@
-import os
-os.environ['PROMETHEUS_DISABLE_CREATED_SERIES'] = 'true'  # cleaner /metrics output
+from urllib import request
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from scipy import stats
+from starlette.responses import HTMLResponse, RedirectResponse
 from uvicorn import run as app_run
 
 from typing import Optional
 import time
-import numpy as np
-import pandas as pd
-from scipy import stats
 
+# Importing constants and pipeline modules from the project
 from src.constants import APP_HOST, APP_PORT
 from src.pipline.prediction_pipeline import VehicleData, VehicleDataClassifier
 from src.pipline.training_pipeline import TrainPipeline
@@ -21,30 +20,44 @@ from src.pipline.training_pipeline import TrainPipeline
 # ─────────────────────────────────────────────────────────────
 # PROMETHEUS METRICS SETUP
 # ─────────────────────────────────────────────────────────────
-from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
+from prometheus_client import (
+    Counter,
+    Gauge,
+    Histogram,
+    make_asgi_app
+)
 
 # ── 1. REQUEST METRICS ────────────────────────────────────────
+# Counts every API request — only goes UP
 request_counter = Counter(
     'vehicle_insurance_requests_total',
     'Total number of API requests received',
     ['method', 'endpoint', 'status_code']
+    # method      → GET or POST
+    # endpoint    → / or /train
+    # status_code → 200, 422, 500
 )
 
 # ── 2. ERROR METRICS ──────────────────────────────────────────
+# Counts every error/exception — only goes UP
 error_counter = Counter(
     'vehicle_insurance_errors_total',
     'Total number of errors during prediction or training',
     ['error_type']
+    # error_type → ValueError, KeyError, training_error etc.
 )
 
 # ── 3. PREDICTION RESULT METRICS ─────────────────────────────
+# Counts Response-Yes vs Response-No — only goes UP
 prediction_counter = Counter(
     'vehicle_insurance_predictions_total',
     'Total predictions made by result',
     ['response']
+    # response → Response-Yes or Response-No
 )
 
 # ── 4. LATENCY METRICS ────────────────────────────────────────
+# Tracks how long each prediction takes — histogram (buckets)
 prediction_latency = Histogram(
     'vehicle_insurance_prediction_latency_seconds',
     'Time taken to process each prediction request',
@@ -52,271 +65,69 @@ prediction_latency = Histogram(
 )
 
 # ── 5. TRAINING METRICS ───────────────────────────────────────
+# Counts training runs — only goes UP
 training_run_counter = Counter(
     'vehicle_insurance_training_runs_total',
     'Total number of training pipeline runs',
     ['status']
+    # status → success or failure
 )
+
+# Training duration — goes UP and DOWN (Gauge)
 training_duration_gauge = Gauge(
     'vehicle_insurance_training_duration_seconds',
     'Time taken for last training pipeline run'
 )
+
+# Last training timestamp — goes UP and DOWN (Gauge)
 last_training_timestamp = Gauge(
     'vehicle_insurance_last_training_timestamp_seconds',
     'Unix timestamp of last successful training run'
 )
 
-# ── 6. INPUT FEATURE METRICS ──────────────────────────────────
+# ── 6. INPUT FEATURE METRICS (for drift monitoring) ──────────
+# Average value of numeric features — goes UP and DOWN (Gauge)
 feature_avg_gauge = Gauge(
     'vehicle_insurance_feature_avg',
     'Rolling average of numeric input feature values',
     ['feature']
+    # feature → Age, Annual_Premium, Vintage, Region_Code, Policy_Sales_Channel
 )
 
 # ── 7. DATA QUALITY METRICS ───────────────────────────────────
+# Missing/null input values — only goes UP
 missing_value_counter = Counter(
     'vehicle_insurance_missing_values_total',
     'Total missing or null input values detected per feature',
     ['feature']
+    # feature → Gender, Age, Annual_Premium etc.
 )
+
+# Out-of-range / anomalous inputs — only goes UP
 anomaly_counter = Counter(
     'vehicle_insurance_input_anomalies_total',
     'Total out-of-range or anomalous input values detected',
     ['feature']
+    # feature → Age (< 18 or > 100), Annual_Premium (< 0) etc.
 )
 
 # ── 8. ACTIVE REQUESTS ────────────────────────────────────────
+# Currently in-flight requests — goes UP and DOWN (Gauge)
 active_requests_gauge = Gauge(
     'vehicle_insurance_active_requests',
     'Number of prediction requests currently being processed'
 )
 
 # ── 9. RESPONSE YES RATIO ─────────────────────────────────────
+# Ratio of Response-Yes over total — goes UP and DOWN (Gauge)
 response_yes_ratio_gauge = Gauge(
     'vehicle_insurance_response_yes_ratio',
     'Rolling ratio of Response-Yes predictions (0.0 to 1.0)'
 )
 
-# ─────────────────────────────────────────────────────────────
-# NEW: DRIFT DETECTION METRICS
-# ─────────────────────────────────────────────────────────────
-
-# PSI Score per feature
-# PSI < 0.1  → no drift
-# PSI 0.1-0.2 → slight drift
-# PSI > 0.2  → significant drift → retrain!
-psi_score_gauge = Gauge(
-    'vehicle_insurance_psi_score',
-    'PSI drift score per feature (Population Stability Index)',
-    ['feature']
-    # feature → Age, Annual_Premium, Vintage, Region_Code, Policy_Sales_Channel
-)
-
-# KS Test Score per feature
-# ks_score close to 0 → no drift
-# ks_score close to 1 → high drift
-ks_score_gauge = Gauge(
-    'vehicle_insurance_ks_score',
-    'KS Test drift score per feature (Kolmogorov-Smirnov)',
-    ['feature']
-)
-
-# KS Test p-value per feature
-# p_value < 0.05 → drift detected (statistically significant)
-# p_value > 0.05 → no significant drift
-ks_pvalue_gauge = Gauge(
-    'vehicle_insurance_ks_pvalue',
-    'KS Test p-value per feature (< 0.05 means drift detected)',
-    ['feature']
-)
-
-# Overall drift flag per feature
-# 1.0 = drift detected
-# 0.0 = no drift
-drift_detected_gauge = Gauge(
-    'vehicle_insurance_drift_detected',
-    'Whether drift is detected per feature (1=drift, 0=no drift)',
-    ['feature', 'method']
-    # method → psi or ks
-)
-
-# Overall dataset drift flag
-# 1.0 = at least one feature has drifted
-# 0.0 = no features drifted
-dataset_drift_gauge = Gauge(
-    'vehicle_insurance_dataset_drift',
-    'Overall dataset drift flag (1=dataset drifted, 0=stable)'
-)
-
-# Number of drifted features
-drifted_features_count_gauge = Gauge(
-    'vehicle_insurance_drifted_features_count',
-    'Number of features that have drifted'
-)
-
-# ─────────────────────────────────────────────────────────────
-# REFERENCE DATA — Training distribution
-# These are approximate distributions from your training data
-# Replace with actual values from your training dataset
-# ─────────────────────────────────────────────────────────────
-
-REFERENCE_DISTRIBUTIONS = {
-    'Age': {
-        'mean': 38.0,
-        'std': 15.0,
-        'min': 20,
-        'max': 85,
-        # sample reference data for KS test
-        'samples': list(np.random.normal(38.0, 15.0, 1000).clip(20, 85))
-    },
-    'Annual_Premium': {
-        'mean': 30000.0,
-        'std': 15000.0,
-        'min': 2630,
-        'max': 540165,
-        'samples': list(np.random.normal(30000.0, 15000.0, 1000).clip(2630, 540165))
-    },
-    'Vintage': {
-        'mean': 154.0,
-        'std': 83.0,
-        'min': 10,
-        'max': 299,
-        'samples': list(np.random.normal(154.0, 83.0, 1000).clip(10, 299))
-    },
-    'Region_Code': {
-        'mean': 26.0,
-        'std': 13.0,
-        'min': 0,
-        'max': 52,
-        'samples': list(np.random.normal(26.0, 13.0, 1000).clip(0, 52))
-    },
-    'Policy_Sales_Channel': {
-        'mean': 112.0,
-        'std': 54.0,
-        'min': 1,
-        'max': 163,
-        'samples': list(np.random.normal(112.0, 54.0, 1000).clip(1, 163))
-    }
-}
-
-# Rolling window to collect live data for drift calculation
-# Stores last N prediction inputs
-DRIFT_WINDOW_SIZE = 100   # calculate drift every 100 predictions
-live_data_buffer = {
-    'Age': [],
-    'Annual_Premium': [],
-    'Vintage': [],
-    'Region_Code': [],
-    'Policy_Sales_Channel': []
-}
-
-# Internal counters
+# Internal counters to calculate ratio
 _yes_count = 0
 _total_count = 0
-
-
-# ─────────────────────────────────────────────────────────────
-# DRIFT CALCULATION FUNCTIONS
-# ─────────────────────────────────────────────────────────────
-
-def calculate_psi(reference: list, current: list, bins: int = 10) -> float:
-    """
-    Calculate PSI (Population Stability Index) between
-    reference data (training) and current data (live).
-
-    PSI < 0.1   → No drift       ✅
-    PSI 0.1-0.2 → Slight drift   ⚠️
-    PSI > 0.2   → Major drift    ❌ retrain!
-    """
-    try:
-        # Create bin edges from reference data
-        breakpoints = np.linspace(
-            min(min(reference), min(current)),
-            max(max(reference), max(current)),
-            bins + 1
-        )
-
-        # Count values in each bin
-        ref_counts = np.histogram(reference, breakpoints)[0]
-        cur_counts = np.histogram(current, breakpoints)[0]
-
-        # Convert to percentages — avoid division by zero
-        ref_pct = ref_counts / len(reference) + 1e-10
-        cur_pct = cur_counts / len(current) + 1e-10
-
-        # PSI formula: Σ (actual - expected) * ln(actual/expected)
-        psi_values = (cur_pct - ref_pct) * np.log(cur_pct / ref_pct)
-        psi = float(np.sum(psi_values))
-
-        return round(psi, 4)
-
-    except Exception:
-        return 0.0
-
-
-def calculate_ks_test(reference: list, current: list):
-    """
-    KS Test (Kolmogorov-Smirnov) — checks if two distributions
-    are significantly different.
-
-    Returns:
-        ks_statistic → 0 to 1 (higher = more drift)
-        p_value      → < 0.05 means drift is statistically significant
-    """
-    try:
-        ks_stat, p_value = stats.ks_2samp(reference, current)
-        return round(float(ks_stat), 4), round(float(p_value), 4)
-    except Exception:
-        return 0.0, 1.0
-
-
-def run_drift_detection():
-    """
-    Runs PSI + KS Test on all features.
-    Pushes all drift scores to Prometheus gauges.
-    Called every DRIFT_WINDOW_SIZE predictions.
-    """
-    drifted_count = 0
-
-    for feature, current_values in live_data_buffer.items():
-
-        # Need minimum samples to calculate drift
-        if len(current_values) < 30:
-            continue
-
-        reference_values = REFERENCE_DISTRIBUTIONS[feature]['samples']
-
-        # ── Calculate PSI ──────────────────────────────────────
-        psi = calculate_psi(reference_values, current_values)
-        psi_score_gauge.labels(feature=feature).set(psi)
-
-        # PSI drift flag
-        psi_drifted = 1.0 if psi > 0.2 else 0.0
-        drift_detected_gauge.labels(
-            feature=feature,
-            method='psi'
-        ).set(psi_drifted)
-
-        # ── Calculate KS Test ──────────────────────────────────
-        ks_stat, p_value = calculate_ks_test(reference_values, current_values)
-        ks_score_gauge.labels(feature=feature).set(ks_stat)
-        ks_pvalue_gauge.labels(feature=feature).set(p_value)
-
-        # KS drift flag — p_value < 0.05 means drift
-        ks_drifted = 1.0 if p_value < 0.05 else 0.0
-        drift_detected_gauge.labels(
-            feature=feature,
-            method='ks'
-        ).set(ks_drifted)
-
-        # Count drifted features (using PSI as primary)
-        if psi_drifted == 1.0:
-            drifted_count += 1
-
-    # ── Overall dataset drift ──────────────────────────────────
-    dataset_drift_gauge.set(1.0 if drifted_count > 0 else 0.0)
-    drifted_features_count_gauge.set(drifted_count)
-
 
 # ─────────────────────────────────────────────────────────────
 # FASTAPI APP SETUP
@@ -324,12 +135,18 @@ def run_drift_detection():
 
 app = FastAPI()
 
+# Mount Prometheus /metrics endpoint
+# Access at: http://localhost:8080/metrics
 metrics_app = make_asgi_app()
 app.mount("/metrics/", metrics_app)
 
+# Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Jinja2 templates
 templates = Jinja2Templates(directory='template')
 
+# CORS
 origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -340,19 +157,27 @@ app.add_middleware(
 )
 
 # ─────────────────────────────────────────────────────────────
-# MIDDLEWARE
+# MIDDLEWARE — tracks every request automatically
 # ─────────────────────────────────────────────────────────────
 
 @app.middleware("http")
 async def track_request_metrics(request: Request, call_next):
+    """
+    Fires on EVERY request automatically.
+    Tracks: request count, latency, active requests.
+    """
+    # Track active requests
     active_requests_gauge.inc()
+
     start_time = time.time()
 
     response = await call_next(request)
 
+    # Calculate latency
     latency = time.time() - start_time
     prediction_latency.observe(latency)
 
+    # Count request with labels
     request_counter.labels(
         method=request.method,
         endpoint=request.url.path,
@@ -360,6 +185,7 @@ async def track_request_metrics(request: Request, call_next):
     ).inc()
 
     active_requests_gauge.dec()
+
     return response
 
 
@@ -368,10 +194,8 @@ async def track_request_metrics(request: Request, call_next):
 # ─────────────────────────────────────────────────────────────
 
 class DataForm:
-
     """
     DataForm class to handle and process incoming form data.
-    This class defines the vehicle-related attributes expected from the form.
     """
     def __init__(self, request: Request):
         self.request: Request = request
@@ -388,11 +212,6 @@ class DataForm:
         self.Vehicle_Damage_Yes: Optional[int] = None
 
     async def get_vehicle_data(self):
-
-        """
-        Method to retrieve and assign form data to class attributes.
-        This method is asynchronous to handle form data fetching without blocking.
-        """
         form = await self.request.form()
         self.Gender = form.get("Gender")
         self.Age = form.get("Age")
@@ -413,11 +232,13 @@ class DataForm:
 
 def track_input_metrics(form: DataForm):
     """
-    1. Missing value checks      → missing_value_counter
-    2. Anomaly / range checks    → anomaly_counter
-    3. Feature averages          → feature_avg_gauge
-    4. Buffer live data          → for drift detection
+    Checks for:
+    1. Missing/null values       → missing_value_counter
+    2. Out-of-range values       → anomaly_counter
+    3. Feature averages          → feature_avg_gauge (for drift)
     """
+    global _yes_count, _total_count
+
     # ── Missing value checks ──────────────────────────────────
     all_fields = {
         "Gender": form.Gender,
@@ -435,9 +256,10 @@ def track_input_metrics(form: DataForm):
 
     for field, value in all_fields.items():
         if value is None or value == "":
+            # Missing value detected → increment counter
             missing_value_counter.labels(feature=field).inc()
 
-    # ── Anomaly checks ────────────────────────────────────────
+    # ── Anomaly / out-of-range checks ────────────────────────
     try:
         if form.Age and (int(form.Age) < 18 or int(form.Age) > 100):
             anomaly_counter.labels(feature='Age').inc()
@@ -462,7 +284,7 @@ def track_input_metrics(form: DataForm):
     except (ValueError, TypeError):
         anomaly_counter.labels(feature='Region_Code').inc()
 
-    # ── Feature averages ──────────────────────────────────────
+    # ── Feature average tracking (for drift detection) ───────
     numeric_features = {
         'Age': form.Age,
         'Annual_Premium': form.Annual_Premium,
@@ -474,32 +296,16 @@ def track_input_metrics(form: DataForm):
     for feature, value in numeric_features.items():
         try:
             if value is not None and value != "":
-                float_val = float(value)
-                # Update feature average gauge
-                feature_avg_gauge.labels(feature=feature).set(float_val)
-
-                # ── Buffer live data for drift detection ──────
-                live_data_buffer[feature].append(float_val)
-
-                # Keep only last DRIFT_WINDOW_SIZE values
-                if len(live_data_buffer[feature]) > DRIFT_WINDOW_SIZE:
-                    live_data_buffer[feature] = \
-                        live_data_buffer[feature][-DRIFT_WINDOW_SIZE:]
-
+                feature_avg_gauge.labels(feature=feature).set(float(value))
         except (ValueError, TypeError):
             pass
-
-    # ── Run drift detection every 10 predictions ──────────────
-    # (use DRIFT_WINDOW_SIZE for production)
-    min_buffer = min(len(v) for v in live_data_buffer.values())
-    if min_buffer >= 10:          # change to DRIFT_WINDOW_SIZE in production
-        run_drift_detection()
 
 
 # ─────────────────────────────────────────────────────────────
 # ROUTES
 # ─────────────────────────────────────────────────────────────
 
+# GET / — render the form
 @app.get("/", tags=["authentication"])
 async def vehicledata(request: Request):
     return templates.TemplateResponse(
@@ -508,17 +314,23 @@ async def vehicledata(request: Request):
     )
 
 
+# POST / — prediction route with full metrics
 @app.post("/")
 async def predictRouteClient(request: Request):
+    """
+    Receives form data → validates → predicts → tracks all metrics.
+    """
     global _yes_count, _total_count
 
     try:
+        # ── Load form data ────────────────────────────────────
         form = DataForm(request)
         await form.get_vehicle_data()
 
-        # Track input metrics + buffer for drift
+        # ── Track input quality + feature averages ────────────
         track_input_metrics(form)
 
+        # ── Build VehicleData object ──────────────────────────
         vehicle_data = VehicleData(
             Gender=form.Gender,
             Age=form.Age,
@@ -533,13 +345,16 @@ async def predictRouteClient(request: Request):
             Vehicle_Damage_Yes=form.Vehicle_Damage_Yes
         )
 
+        # ── Run prediction ────────────────────────────────────
         vehicle_df = vehicle_data.get_vehicle_input_data_frame()
         model_predictor = VehicleDataClassifier()
         value = model_predictor.predict(dataframe=vehicle_df)[0]
         status = "Response-Yes" if value == 1 else "Response-No"
 
+        # ── Track prediction result ───────────────────────────
         prediction_counter.labels(response=status).inc()
 
+        # ── Update Response-Yes ratio ─────────────────────────
         _total_count += 1
         if value == 1:
             _yes_count += 1
@@ -553,17 +368,23 @@ async def predictRouteClient(request: Request):
 
     except Exception as e:
         import traceback
+        # ── Track error with type ─────────────────────────────
         error_counter.labels(error_type=type(e).__name__).inc()
         return {"status": False, "error": traceback.format_exc()}
 
 
+# GET /train — training route with full metrics
 @app.get("/train")
 async def trainRouteClient():
+    """
+    Triggers training pipeline and tracks duration, status, timestamp.
+    """
     start_time = time.time()
     try:
         train_pipeline = TrainPipeline()
         train_pipeline.run_pipeline()
 
+        # ── Track training success ────────────────────────────
         duration = time.time() - start_time
         training_duration_gauge.set(duration)
         training_run_counter.labels(status='success').inc()
@@ -572,6 +393,7 @@ async def trainRouteClient():
         return Response("Training successful!!!")
 
     except Exception as e:
+        # ── Track training failure ────────────────────────────
         training_run_counter.labels(status='failure').inc()
         error_counter.labels(error_type='training_error').inc()
         return Response(f"Error Occurred! {e}")
