@@ -6,7 +6,7 @@ from src.components.data_ingestion import DataIngestion
 from src.components.data_validation import DataValidation
 from src.components.data_transformation import DataTransformation
 from src.components.model_trainer import ModelTrainer
-from Vehicle_Insurance_Data_Pipeline.src.components.model_evaluation2 import ModelEvaluation
+from src.components.model_evaluation import ModelEvaluation
 from src.components.model_pusher import ModelPusher
 
 from src.entity.config_entity import (DataIngestionConfig,

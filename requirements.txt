@@ -21,3 +21,4 @@ imblearn
 prometheus_client
 evidently
 mlflow
+dagshub
